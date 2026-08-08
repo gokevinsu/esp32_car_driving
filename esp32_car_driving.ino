@@ -13,6 +13,7 @@ struct JoystickPacket {
   int16_t y;
   int16_t z;
 };
+JoystickPacket packet;
 
 
 unsigned long lastPacketTime = 0;
@@ -58,6 +59,7 @@ const uint8_t bl1 = 29;
 const uint8_t bl2 = 31;
 
 const int deadZone = 20;
+const int motorThreshold = 4095 * 3 / 10;
 
 
 // =========================
@@ -272,24 +274,28 @@ void setMotor(int speed, uint8_t in1, uint8_t in2, uint8_t pwmPin) {
 
   speed = constrain(speed, -4095, 4095);
 
-  if (speed > 0) {
+  if (abs(speed) > motorThreshold) {
 
-    // Forward
-    digitalWrite(in1, HIGH);
-    digitalWrite(in2, LOW);
+    if (speed > 0) {
 
-  } else if (speed < 0) {
+      // Forward
+      digitalWrite(in1, HIGH);
+      digitalWrite(in2, LOW);
+      ledcWrite(pwmPin, abs(speed));
 
-    // Reverse
-    digitalWrite(in1, LOW);
-    digitalWrite(in2, HIGH);
+    } else {
+
+      // Reverse
+      digitalWrite(in1, LOW);
+      digitalWrite(in2, HIGH);
+      ledcWrite(pwmPin, abs(speed));
+    }
 
   } else {
 
     // Stop
     digitalWrite(in1, LOW);
     digitalWrite(in2, LOW);
+    ledcWrite(pwmPin, 0);
   }
-
-  ledcWrite(pwmPin, abs(speed));
 }
