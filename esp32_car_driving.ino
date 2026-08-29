@@ -1,301 +1,223 @@
 #include <WiFi.h>
 #include <WiFiUdp.h>
+//#include <SPI.h>
+//#include <RF24.h>
+#include "USB.h"
 
-const char* ssid = "DEA";
-const char* password = "40542992";
-
+HWCDC USBOtgSerial; 
 WiFiUDP udp;
+//RF24 radio(9, 10);
 
 const uint16_t port = 4210;
-
-struct JoystickPacket {
+const uint32_t discoveryMagic = 0x43415231;
+struct __attribute__((packed)) WifiJoystickPacket{
   int16_t x;
   int16_t y;
   int16_t z;
 };
-JoystickPacket packet;
-
+WifiJoystickPacket packet;
 
 unsigned long lastPacketTime = 0;
-const unsigned long timeout = 200;
+const int timeout = 200;
+const int motorThreshold = 1230;
+bool standby = HIGH;
+int percent = 0;
+float v = 0;
+int fr;
+int fl;
+int br;
+int bl;
+const float dividerRatio = (1000000.0 + 4700.0) / 4700.0;
+const float voltageByPercent[] = {
+  9.00, 9.90, 10.50, 10.80, 11.00, 11.10, 11.20, 11.30, 11.40,
+  11.50, 11.60, 11.70, 11.80, 11.90, 12.00, 12.10, 12.20, 12.30,
+  12.40, 12.50, 12.60
+};
+unsigned long lastDebugTime = 0;
+const int debugInterval = 50;
+enum mode {driveWifi, driveRadio, Auto};
+mode currentMode = driveWifi;
+//const byte radioAddress[6] = "CAR01";
 
+//pins 
+const uint8_t frpwm = 17;
+const uint8_t frm1 = 15;
+const uint8_t frm2 = 16;
 
-// Return X axis
-int a() {
-  return packet.x;
-}
+const uint8_t flpwm = 47;
+const uint8_t flm1 = 48;
+const uint8_t flm2 = 45;
 
+const uint8_t brpwm = 4;
+const uint8_t brm1 = 5;
+const uint8_t brm2 = 6;
 
-// Return Y axis
-int b() {
-  return packet.y;
-}
+const uint8_t blpwm = 1;
+const uint8_t blm1 = 0;
+const uint8_t blm2 = 2;
 
+const uint8_t fre1 = 37;
+const uint8_t fre2 = 38;
 
-// Return Z axis
-int c() {
-  return packet.z;
-}
+const uint8_t fle1 = 35;
+const uint8_t fle2 = 36;
 
+const uint8_t bre1 = 40;
+const uint8_t bre2 = 39;
 
-// =========================
-// Motor pins
-// =========================
+const uint8_t ble1 = 41;
+const uint8_t ble2 = 42;
 
-const uint8_t frpwm = 22;
-const uint8_t fr1 = 20;
-const uint8_t fr2 = 21;
+const uint8_t statusLedPin = 3;
 
-const uint8_t brpwm = 23;
-const uint8_t br1 = 25;
-const uint8_t br2 = 24;
+const uint8_t stby = 7;
 
-const uint8_t flpwm = 28;
-const uint8_t fl1 = 27;
-const uint8_t fl2 = 26;
-
-const uint8_t blpwm = 30;
-const uint8_t bl1 = 29;
-const uint8_t bl2 = 31;
-
-const int deadZone = 20;
-const int motorThreshold = 4095 * 3 / 10;
-
-
-// =========================
-// Setup
-// =========================
+const uint8_t batteryPin = 8;
 
 void setup() {
-
   Serial.begin(115200);
+  USBOtgSerial.begin(115200);
 
-  // Wi-Fi
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(ssid, password);
-
-  Serial.print("Connecting");
-
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
-
-  Serial.println();
-  Serial.println("Connected!");
-
-  Serial.print("P4 IP: ");
-  Serial.println(WiFi.localIP());
-
-  // UDP
+  WiFi.mode(WIFI_AP);
+  WiFi.setSleep(false);
+  WiFi.softAPConfig(IPAddress(192, 168, 4, 1), IPAddress(192, 168, 4, 1), IPAddress(255, 255, 255, 0));
+  Serial.print("IP: ");
+  Serial.println(WiFi.softAPIP());
   udp.begin(port);
 
-  Serial.print("Listening on port ");
-  Serial.println(port);
+  /*SPI.begin();
+  if (!radio.begin()) {
+    Serial.println("RF24 radio not detected");
+  }
+  else {
+    radio.setChannel(108);
+    radio.setDataRate(RF24_1MBPS);
+    radio.setPALevel(RF24_PA_LOW);
+    radio.openReadingPipe(1, radioAddress);
+    radio.startListening();
+    Serial.println("RF24 receiver ready");
+  }*/
 
-
-  // PWM
+  delay(1000);
   ledcAttach(frpwm, 2000, 12);
   ledcAttach(brpwm, 2000, 12);
   ledcAttach(flpwm, 2000, 12);
   ledcAttach(blpwm, 2000, 12);
 
+  pinMode(frm1, OUTPUT);
+  pinMode(frm2, OUTPUT);
 
-  // Direction pins
-  pinMode(fl1, OUTPUT);
-  pinMode(fl2, OUTPUT);
+  pinMode(blm1, OUTPUT);
+  pinMode(blm2, OUTPUT);
 
-  pinMode(bl1, OUTPUT);
-  pinMode(bl2, OUTPUT);
+  pinMode(flm1, OUTPUT);
+  pinMode(flm2, OUTPUT);
 
-  pinMode(fr1, OUTPUT);
-  pinMode(fr2, OUTPUT);
+  pinMode(brm1, OUTPUT);
+  pinMode(brm2, OUTPUT);
 
-  pinMode(br1, OUTPUT);
-  pinMode(br2, OUTPUT);
+  pinMode(fle1, INPUT);
+  pinMode(fle2, INPUT);
 
+  pinMode(bre1, INPUT);
+  pinMode(bre2, INPUT);
 
-  // Start centered
-  packet.x = 2048;
-  packet.y = 2048;
-  packet.z = 2048;
+  pinMode(ble1, INPUT);
+  pinMode(ble2, INPUT);
+
+  pinMode(fre1, INPUT);
+  pinMode(fre2, INPUT);
+
+  pinMode(batteryPin, INPUT);
+  pinMode(statusLedPin, OUTPUT);
+  pinMode(stby, OUTPUT);
 }
 
-
-// =========================
-// Loop
-// =========================
 
 void loop() {
+  v = analogRead(batteryPin) * (3.3 / 4095.0) * dividerRatio;
+  percent = 0;
+  for (int step = 0; step <= 20; step++) {
+    if (v >= voltageByPercent[step]) {
+      percent = step * 5;
+    }
+  }
+  digitalWrite(statusLedPin, (WiFi.softAPgetStationNum() > 0 ? HIGH:LOW));
+  digitalWrite(stby, standby);
 
-  // =========================
-  // Receive joystick packet
-  // =========================
+  //wifi
+  if(currentMode == driveWifi){
+    int packetSize;
+    while ((packetSize = udp.parsePacket()) > 0) {
+      if (packetSize == sizeof(discoveryMagic)) {
+        uint32_t receivedMagic;
+        udp.read((uint8_t*)&receivedMagic, sizeof(receivedMagic));
+        if (receivedMagic == discoveryMagic) {
+          udp.beginPacket(udp.remoteIP(), udp.remotePort());
+          udp.write((uint8_t*)&discoveryMagic, sizeof(discoveryMagic));
+          udp.endPacket();
+        }
+      }
+      else if (packetSize == sizeof(WifiJoystickPacket) && udp.read((uint8_t*)&packet, sizeof(packet)) == sizeof(WifiJoystickPacket)) {
+        lastPacketTime = millis();
+        fl = constrain(packet.x + packet.y + packet.z, -4095, 4095);
+        fr = constrain(packet.x - packet.y - packet.z, -4095, 4095);
+        bl = constrain(packet.x - packet.y + packet.z, -4095, 4095);
+        br = constrain(packet.x + packet.y - packet.z, -4095, 4095);
+      }
+    }
+  }
 
-  int packetSize = udp.parsePacket();
-
-  if (packetSize == sizeof(JoystickPacket)) {
-
-    int bytesRead = udp.read(
-      (uint8_t*)&packet,
-      sizeof(packet));
-
-    if (bytesRead == sizeof(JoystickPacket)) {
-
-      // Valid packet received
+  //radio
+  /*if(currentMode == driveRadio){
+    while (radio.available()) {
+      radio.read(&packet, sizeof(packet));
       lastPacketTime = millis();
+      fl = constrain(packet.x + packet.y + packet.z, -4095, 4095);
+      fr = constrain(packet.x - packet.y - packet.z, -4095, 4095);
+      bl = constrain(packet.x - packet.y + packet.z, -4095, 4095);
+      br = constrain(packet.x + packet.y - packet.z, -4095, 4095);
+    }
+  }*/
+
+  //auto
+  if(currentMode == Auto){
+    if (USBOtgSerial.available() >= 10) {
+      if (USBOtgSerial.read() == 0xAA) {
+        if (USBOtgSerial.read() == 0xBB) {
+          uint8_t dataBuffer[8];
+          USBOtgSerial.readBytes(dataBuffer, 8);
+          fr = constrain((int16_t)(dataBuffer[0] | (dataBuffer[1] << 8)), -4095, 4095);
+          fl = constrain((int16_t)(dataBuffer[2] | (dataBuffer[3] << 8)), -4095, 4095);
+          br = constrain((int16_t)(dataBuffer[4] | (dataBuffer[5] << 8)), -4095, 4095);
+          bl = constrain((int16_t)(dataBuffer[6] | (dataBuffer[7] << 8)), -4095, 4095);
+          lastPacketTime = millis();
+        }
+      }
     }
   }
-
-
-  // =========================
-  // Communication timeout
-  // =========================
-
+  
   if (millis() - lastPacketTime > timeout) {
-
-    // Immediately stop all motors
-    setMotor(0, fl1, fl2, flpwm);
-    setMotor(0, fr1, fr2, frpwm);
-    setMotor(0, bl1, bl2, blpwm);
-    setMotor(0, br1, br2, brpwm);
-
-    return;
+    standby = LOW;
+  }
+  else{
+    standby = HIGH;
   }
 
-
-  // =========================
-  // Get joystick values
-  // =========================
-
-  int throttle = map(
-    b(),
-    0,
-    4095,
-    -4095,
-    4095);
-
-  int strafe = map(
-    a(),
-    0,
-    4095,
-    -4095,
-    4095);
-
-  int rotate = map(
-    c(),
-    0,
-    4095,
-    -4095,
-    4095);
-
-
-  // =========================
-  // Dead zone
-  // =========================
-
-  if (abs(throttle) < deadZone) {
-    throttle = 0;
-  }
-
-  if (abs(strafe) < deadZone) {
-    strafe = 0;
-  }
-
-  if (abs(rotate) < deadZone) {
-    rotate = 0;
-  }
-
-
-  // =========================
-  // Mecanum motor calculations
-  // =========================
-
-  int frontLeftSpeed =
-    throttle + strafe + rotate;
-
-  int frontRightSpeed =
-    throttle - strafe - rotate;
-
-  int rearLeftSpeed =
-    throttle - strafe + rotate;
-
-  int rearRightSpeed =
-    throttle + strafe - rotate;
-  // =========================
-  // Limit motor speeds
-  // =========================
-
-  frontLeftSpeed =
-    constrain(frontLeftSpeed, -4095, 4095);
-
-  frontRightSpeed =
-    constrain(frontRightSpeed, -4095, 4095);
-
-  rearLeftSpeed =
-    constrain(rearLeftSpeed, -4095, 4095);
-
-  rearRightSpeed =
-    constrain(rearRightSpeed, -4095, 4095);
-
-
-  // =========================
-  // Drive motors
-  // =========================
-
-  setMotor(
-    frontLeftSpeed,
-    fl1,
-    fl2,
-    flpwm);
-
-  setMotor(
-    frontRightSpeed,
-    fr1,
-    fr2,
-    frpwm);
-
-  setMotor(
-    rearLeftSpeed,
-    bl1,
-    bl2,
-    blpwm);
-
-  setMotor(
-    rearRightSpeed,
-    br1,
-    br2,
-    brpwm);
-}
-
-
-
-void setMotor(int speed, uint8_t in1, uint8_t in2, uint8_t pwmPin) {
-
-  speed = constrain(speed, -4095, 4095);
-
-  if (abs(speed) > motorThreshold) {
-
-    if (speed > 0) {
-
-      // Forward
-      digitalWrite(in1, HIGH);
-      digitalWrite(in2, LOW);
-      ledcWrite(pwmPin, abs(speed));
-
-    } else {
-
-      // Reverse
-      digitalWrite(in1, LOW);
-      digitalWrite(in2, HIGH);
-      ledcWrite(pwmPin, abs(speed));
-    }
-
-  } else {
-
-    // Stop
-    digitalWrite(in1, LOW);
-    digitalWrite(in2, LOW);
-    ledcWrite(pwmPin, 0);
+  if (millis() - lastDebugTime >= debugInterval) {
+    Serial.print("M FR:");
+    Serial.print(fr);
+    Serial.print(" FL:");
+    Serial.print(fl);
+    Serial.print(" BR:");
+    Serial.print(br);
+    Serial.print(" BL:");
+    Serial.print(bl);
+    Serial.print(" STBY:");
+    Serial.print(standby);
+    Serial.print(" BAT:");
+    Serial.print(percent);
+    Serial.println("%");
+    lastDebugTime = millis();
   }
 }
